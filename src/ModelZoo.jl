@@ -14,9 +14,17 @@ measures:
 
 The models:
 
+- `APLR` and `BaggedAPLR`, automatic piecewise linear regression, gradient boosting of linear effects, hinge functions
+  and their interactions, for numbers and classes, with `predict`: TabArena's APLR (default) is `BaggedAPLR` with its
+  defaults;
 - `CoxGAM`, Cox's proportional hazards model with smooth terms, each a penalized thin plate regression spline whose
   smoothing parameter minimizes the REML criterion, with `linear_predictor` and `survival` for new rows: the GAM of the
-  Low-Dimensional Survival Benchmark.
+  Low-Dimensional Survival Benchmark;
+- `ExtraTrees` and `BaggedExtraTrees`, forests of extremely randomized trees for classes and numbers, with `predict`:
+  TabArena's ExtraTrees (default) is `BaggedExtraTrees` with its defaults;
+- `FlexibleSurvival`, the flexible parametric survival model of Royston and Parmar, its log cumulative hazard a natural
+  cubic spline of log time, with `linear_predictor` and `survival` for new rows: the Flex of the Low-Dimensional
+  Survival Benchmark for each number of knots.
 
 ```julia
 import ModelZoo
@@ -28,10 +36,14 @@ module ModelZoo
 
 import LinearAlgebra
 import Printf
+import Random
 
 include("measures/tabular.jl")
 include("measures/survival.jl")
 include("measures/ranking.jl")
 include("models/cox_gam.jl")
+include("models/extra_trees.jl")
+include("models/aplr.jl")
+include("models/flexible_survival.jl")
 
 end

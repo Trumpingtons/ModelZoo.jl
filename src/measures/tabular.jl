@@ -52,13 +52,13 @@ end
 
 The mean negative log-likelihood of the predictions of a multiclass target: `truth` gives the class of each row, as
 its column in `probabilities` (1 to K), and `probabilities` has a row per row of `truth` and a column per class. The
-probability of each row's class is first clipped to [ε, 1 - ε], ε being the machine epsilon of Float64, as
-scikit-learn's log_loss clips it, so that a probability of 0 gives a finite loss.
+probability of each row's class is first clipped to [ε, 1 - ε], ε being the machine epsilon of the probabilities' type
+(Float64 for integers), as scikit-learn's log_loss clips it, so that a probability of 0 gives a finite loss.
 """
 function log_loss(truth::AbstractVector{<:Integer}, probabilities::AbstractMatrix{<:Real})
 	size(probabilities, 1) == length(truth) || error("$(size(probabilities, 1)) rows of probabilities for $(length(truth)) rows.")
 	all(c -> 1 <= c <= size(probabilities, 2), truth) || error("A class is not a column of the probabilities.")
-	ε = eps(Float64)
+	ε = eps(float(eltype(probabilities)))
 	-sum(log(clamp(Float64(probabilities[r, truth[r]]), ε, 1 - ε)) for r in eachindex(truth)) / length(truth)
 end
 
