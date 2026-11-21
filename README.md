@@ -24,12 +24,17 @@ curve = ModelZoo.survival_curve([5, 8, 12, 12, 20], [1, 0, 1, 1, 0])
 
 `survival_curve(time, event)` gives the Kaplan-Meier (Kaplan and Meier, 1958) and Nelson-Aalen (Aalen, 1978) estimates, and `measure_loss(measure, value)` turns a score into a number of which lower is better, to rank by (`MEASURE_BEST`).
 
+## Models
+
+**Cox GAM** (`CoxGAM(time, event, X)`, or `CoxGAM(table, :time, :event)` for a table of columns): Cox's proportional hazards model with smooth terms, the GAM of the Low-Dimensional Survival Benchmark. Each numeric covariate with 10 or more distinct values enters as a thin plate regression spline of dimension 10 (Wood, 2003), the others linearly; the coefficients maximize the partial likelihood with Breslow's handling of ties, penalized by the splines' wiggliness, and the smoothing parameters minimize the REML criterion of Wood, Pya and Säfken (2016), by Newton's method (Wood, 2011). The criterion can have more than one local minimum, so the search starts from three points and keeps the lowest minimum; mgcv, which the benchmark ran, searches from one start, which Wood (2011) describes only in outline, so on some splits the two end at different minima. `linear_predictor(model, X)` gives the log relative risk of new rows and `survival(model, X, times)` their survival, from the Breslow estimate of the baseline hazard.
+
 ## Tests
 
 The tests read the data, the splits and the published scores from PollisCompetitions.jl:
 
 - the survival measures of Kaplan-Meier and Nelson-Aalen, fitted on every split of the 34 survival datasets, give the benchmark's published scores;
 - the C-indices of Cox's model, fitted by Survival.jl, give the published ones on 24 of those datasets; the splits of the other 10 are listed in the test with why they differ;
+- the eight measures of `CoxGAM` give the published means of the benchmark's GAM on 15 of those datasets. Of the other 19, 4 have test rows with a level the training rows lack, which the benchmark imputes at random; 6 have a covariate with more than 2000 distinct values, of which mgcv draws 2000 at random to build its spline; and 9 have splits on which mgcv stopped at a local minimum of the REML criterion higher than the one `CoxGAM` reaches from its three starts, listed in the test;
 - the tabular measures give the values of scikit-learn 1.7.2 on fixed predictions on every tabular dataset whose Response Type has a measure.
 
 ## Licence

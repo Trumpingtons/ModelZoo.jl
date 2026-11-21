@@ -3,6 +3,59 @@ import LinearAlgebra, Survival, TOML
 import ModelZoo as MZ
 import PollisCompetitions as PC
 
+# The covariates of one split of a survival dataset as the Low-Dimensional Survival Benchmark prepares them (mlr3pipelines
+# 0.7.1 in its bl(): fixfactors, imputesample of factors, collapsefactors at 5% and 5 levels, removeconstants), the
+# factors of info.toml coded as R's model.matrix codes them (a column per level after the first). The numeric columns
+# with `smooth_from` or more distinct training values are smooth terms, after the others; of the others, those coxph
+# keeps as linearly independent, with the intercept, in order. Also returned: whether every test row's levels are among
+# the training rows' (the benchmark imputes a level they lack at random).
+label(x::AbstractString) = String(x)
+label(x::Real) = isinteger(x) ? string(Int(x)) : string(x)
+# collapsefactors: with more than 5 levels, the levels of 5% or more of the training rows and the 5 most frequent are
+# kept, and the others merge into the last level kept
+function collapse(levels, counts)
+	length(levels) <= 5 && return Dict(l => l for l in levels)
+	order = sortperm(counts; rev = true, alg = MergeSort)
+	keep = unique([[levels[k] for k in order if counts[k] / sum(counts) >= 0.05]; levels[order[1:5]]])
+	Dict(l => (l in keep ? l : keep[end]) for l in levels)
+end
+function covariates(data, fields, train, test; smooth_from = typemax(Int))
+	factors = get(fields, "factors", Dict{String, Any}())
+	features = [String(n) for n in keys(data) if !(String(n) in (fields["target"], fields["event"]))]
+	comparable = true
+	linear, linear_test, smooth, smooth_test = Vector{Float64}[], Vector{Float64}[], Vector{Float64}[], Vector{Float64}[]
+	for n in features
+		values = getproperty(data, Symbol(n))
+		if haskey(factors, n)
+			x = label.(values)
+			present = [l for l in factors[n] if any(==(l), x[train])]
+			all(v -> v in present, x[test]) || (comparable = false)
+			merging = collapse(present, [count(==(l), x[train]) for l in present])
+			for l in unique(merging[l] for l in present)[2:end]
+				push!(linear, [merging[v] == l ? 1.0 : 0.0 for v in x[train]])
+				push!(linear_test, [get(merging, v, "") == l ? 1.0 : 0.0 for v in x[test]])
+			end
+		elseif length(unique(values[train])) >= smooth_from
+			push!(smooth, Float64.(values[train]))
+			push!(smooth_test, Float64.(values[test]))
+		else
+			push!(linear, Float64.(values[train]))
+			push!(linear_test, Float64.(values[test]))
+		end
+	end
+	# removeconstants; then the columns coxph keeps, in order, by a pivoted QR with the intercept
+	kept = [k for k in eachindex(linear) if length(unique(linear[k])) > 1]
+	linear, linear_test = linear[kept], linear_test[kept]
+	if !isempty(linear)
+		F = LinearAlgebra.qr([ones(length(train)) reduce(hcat, linear)], LinearAlgebra.ColumnNorm())
+		independent = sort(filter(>(1), F.p[1:LinearAlgebra.rank(F.R; rtol = 1e-12)])) .- 1
+		linear, linear_test = linear[independent], linear_test[independent]
+	end
+	X = reduce(hcat, [linear; smooth]; init = zeros(length(train), 0))
+	Xt = reduce(hcat, [linear_test; smooth_test]; init = zeros(length(test), 0))
+	(; X, Xt, smooth = collect(length(linear) .+ eachindex(smooth)), comparable)
+end
+
 # The data, the splits and the published scores of the competitions and benchmarks come from PollisCompetitions.jl.
 @testset "ModelZoo" begin
 	# The measures of the Low-Dimensional Survival Benchmark: Kaplan-Meier and Nelson-Aalen, which have nothing to tune and
@@ -79,62 +132,28 @@ import PollisCompetitions as PC
 	end
 
 	# Cox's model, fitted by Survival.jl (Efron's ties, as R's coxph), on every outer split of the survival datasets,
-	# scored by Harrell's C and Uno's C and compared with the benchmark's CPH means. The covariates are prepared as the
-	# benchmark prepares them for CPH (mlr3pipelines 0.7.1 in its bl(): fixfactors, imputesample of factors,
-	# collapsefactors at 5% and 5 levels, removeconstants), the factors of info.toml coded as R's model.matrix codes them
-	# (a column per level after the first), and the columns coxph drops as collinear dropped. A dataset is compared when
-	# all its splits can be, as the published scores are means over the splits. A split cannot be when:
+	# scored by Harrell's C and Uno's C and compared with the benchmark's CPH means, the covariates prepared by
+	# covariates, all entering linearly. A dataset is compared when all its splits can be, as the published scores are
+	# means over the splits. A split cannot be when:
 	# - a test row has a level of a factor that no training row has: the benchmark imputes it at random;
 	# - it is one of COX_DIFFERENT: the published score differs from ours, while R's coxph on the same training rows
 	#   gives our value (checked on one of them) and the benchmark logged no error.
 	@testset "Cox's model" begin
 		COX_DIFFERENT = Dict("aids_id" => [9], "kidtran" => [15, 21], "liver" => [3, 5, 9], "ova" => [24, 30], "std" => [12], "tumor" => [8])
 		runs = Dict(run["run_id"] => run["scores"] for run in PC.metadata_entries(PC.METADATA, "benchmarks.toml", "runs"))
-		label(x::AbstractString) = String(x)
-		label(x::Real) = isinteger(x) ? string(Int(x)) : string(x)
-		# collapsefactors: with more than 5 levels, the levels of 5% or more of the training rows and the 5 most
-		# frequent are kept, and the others merge into the last level kept
-		function collapse(levels, counts)
-			length(levels) <= 5 && return Dict(l => l for l in levels)
-			order = sortperm(counts; rev = true, alg = MergeSort)
-			keep = unique([[levels[k] for k in order if counts[k] / sum(counts) >= 0.05]; levels[order[1:5]]])
-			Dict(l => (l in keep ? l : keep[end]) for l in levels)
-		end
 		compared = String[]
 		@testset "$(id)" for id in [id for id in readdir(PC.BUILTIN) if PC.competition(id)["response_type"] == "Survival"]
 			fields = PC.info(id)
-			factors = get(fields, "factors", Dict{String, Any}())
 			data = PC.query("SELECT * FROM $(PC.table_sql(id, "data.parquet"))")
 			splits = PC.query("SELECT row, repeat, fold FROM $(PC.table_sql(id, "splits.parquet"))")
 			time, event = Float64.(getproperty(data, Symbol(fields["target"]))), Int.(getproperty(data, Symbol(fields["event"])))
-			features = [String(n) for n in keys(data) if !(String(n) in (fields["target"], fields["event"]))]
 			scores, comparable = Dict{String, Float64}[], !haskey(COX_DIFFERENT, id)
 			for repeat in 1:fields["repeats"], fold in 1:fields["folds"]
 				test = sort(splits.row[(splits.repeat .== repeat) .& (splits.fold .== fold)])
 				train = setdiff(eachindex(time), test)
-				columns, test_columns = Vector{Float64}[], Vector{Float64}[]
-				for n in features
-					values = getproperty(data, Symbol(n))
-					if haskey(factors, n)
-						x = label.(values)
-						present = [l for l in factors[n] if any(==(l), x[train])]
-						all(v -> v in present, x[test]) || (comparable = false)
-						merging = collapse(present, [count(==(l), x[train]) for l in present])
-						for l in unique(merging[l] for l in present)[2:end]
-							push!(columns, [merging[v] == l ? 1.0 : 0.0 for v in x[train]])
-							push!(test_columns, [get(merging, v, "") == l ? 1.0 : 0.0 for v in x[test]])
-						end
-					else
-						push!(columns, Float64.(values[train]))
-						push!(test_columns, Float64.(values[test]))
-					end
-				end
-				# removeconstants; then the columns coxph keeps, in order, by a pivoted QR with the intercept
-				kept = [k for k in eachindex(columns) if length(unique(columns[k])) > 1]
-				X, Xt = reduce(hcat, columns[kept]), reduce(hcat, test_columns[kept])
-				F = LinearAlgebra.qr([ones(length(train)) X], LinearAlgebra.ColumnNorm())
-				independent = sort(filter(>(1), F.p[1:LinearAlgebra.rank(F.R; rtol = 1e-12)])) .- 1
-				X, Xt = X[:, independent], Xt[:, independent]
+				prepared = covariates(data, fields, train, test)
+				prepared.comparable || (comparable = false)
+				X, Xt = prepared.X, prepared.Xt
 				# Survival.jl's search reaches its iteration limit on some splits as the covariates are and on others once
 				# they are centred: the fit as they are, else centred, which leaves the ranking of the test rows unchanged
 				y = Survival.EventTime.(time[train], event[train] .== 1)
@@ -155,5 +174,55 @@ import PollisCompetitions as PC
 			@test all(isapprox(sum(s[m] for s in scores) / length(scores), published[m]; rtol = 1e-9, atol = 1e-12) for m in ("harrell_c", "uno_c"))
 		end
 		@test length(compared) == 24
+	end
+
+	# Cox's model with smooth terms (CoxGAM) on every outer split of the survival datasets, compared, as means over the
+	# splits, with the benchmark's GAM, mgcv 1.9-1's gam with the cox.ph family and REML, with the formula of
+	# mlr3extralearners (a smooth term for each numeric covariate with 10 or more distinct training values), the survival
+	# from Breslow's estimate. The covariates are prepared by covariates. A dataset is compared when all its splits can
+	# be. A split cannot be when:
+	# - a test row has a level of a factor that no training row has: the benchmark imputes it at random;
+	# - a smooth covariate has more than 2000 distinct training values: mgcv builds its spline on 2000 of them drawn at
+	#   random;
+	# - it is one of GAM_DIFFERENT: mgcv stopped at smoothing parameters whose REML criterion is higher than at those
+	#   CoxGAM reaches, which the published scores reflect. The criterion can have more than one local minimum: mgcv
+	#   searches from one start, CoxGAM from three, keeping the lowest minimum, and as Wood (2011) describes mgcv's
+	#   start only in outline, a search from one start cannot be sure to begin where mgcv's does and end where it
+	#   ends. Checked on every one of them with mgcv 1.9.4 on the same training rows, by evaluating CoxGAM's criterion
+	#   at mgcv's smoothing parameters, put on CoxGAM's scale by the wiggliness each penalty gives mgcv's fitted smooth
+	#   terms; on 4 of them (carpenter_fda_data 6, 9 and 14, tumor 30) mgcv 1.9.4 does not give the published scores
+	#   either.
+	# The REML criterion is flat near its minimum, so smoothing parameters that leave it unchanged to 1e-6 can move the
+	# measures by more than that, D-calibration most, as it counts the test rows in bins of their survival.
+	@testset "Cox GAM" begin
+		GAM_DIFFERENT = Dict("carpenter_fda_data" => [4, 6, 9, 14, 28], "channing" => [11], "e1684" => [11], "metabric" => [1],
+			"std" => [25], "tumor" => [30], "uis" => [9], "veteran" => [17, 20, 25, 29], "wbc1" => [4, 7, 24])
+		runs = Dict(run["run_id"] => run["scores"] for run in PC.metadata_entries(PC.METADATA, "benchmarks.toml", "runs"))
+		compared = String[]
+		@testset "$(id)" for id in [id for id in readdir(PC.BUILTIN) if PC.competition(id)["response_type"] == "Survival"]
+			haskey(GAM_DIFFERENT, id) && continue
+			fields = PC.info(id)
+			data = PC.query("SELECT * FROM $(PC.table_sql(id, "data.parquet"))")
+			splits = PC.query("SELECT row, repeat, fold FROM $(PC.table_sql(id, "splits.parquet"))")
+			time, event = Float64.(getproperty(data, Symbol(fields["target"]))), Int.(getproperty(data, Symbol(fields["event"])))
+			# The splits' covariates first, as a dataset that cannot be compared need not be fitted
+			prepared = [begin
+				test = sort(splits.row[(splits.repeat .== repeat) .& (splits.fold .== fold)])
+				train = setdiff(eachindex(time), test)
+				(; train, test, covariates(data, fields, train, test; smooth_from = 10)...)
+			end for repeat in 1:fields["repeats"] for fold in 1:fields["folds"]]
+			all(p -> p.comparable && all(j -> length(unique(view(p.X, :, j))) <= 2000, p.smooth), prepared) || continue
+			scores = map(prepared) do p
+				model = MZ.CoxGAM(time[p.train], event[p.train], p.X; smooth = p.smooth)
+				times = sort!(unique(MZ.tie_times(time[p.train])))
+				MZ.survival_scores(time[p.train], event[p.train], time[p.test], event[p.test], times, MZ.survival(model, p.Xt, times);
+					crank = MZ.linear_predictor(model, p.Xt))
+			end
+			push!(compared, id)
+			published = runs["survival_benchmark_gam.$(id)"]
+			@test all(isapprox(sum(s[m] for s in scores) / length(scores), published[m]; rtol = m == "dcalib" ? 5e-2 : 1e-3, atol = 1e-6)
+				for m in MZ.SURVIVAL_MEASURES)
+		end
+		@test length(compared) == 15
 	end
 end

@@ -229,10 +229,13 @@ The eight measures of the Low-Dimensional Survival Benchmark on one split, as a 
 `SURVIVAL_MEASURES`: Harrell's C and Uno's C of `crank`; the integrated survival log loss and Brier score, and their
 explained residual variation (ERV), 1 minus the ratio of the score to that of the Kaplan-Meier estimate of the same
 training rows; D-calibration; and alpha-calibration. `survival` holds the predicted survival of each test row (a row
-each) at `times` (a column each, increasing). The event indicators are 1 for an event and 0 for a censored time.
+each) at `times` (a column each, increasing). The event indicators are 1 for an event and 0 for a censored time. The
+survival is first taken as 1 less the distribution function 1 - S, as the benchmark's predicted distributions hold
+it, so that a survival below the precision of numbers near 1 (about 1e-16) counts as 0.
 """
 function survival_scores(train_time, train_event, test_time, test_event, times, survival::AbstractMatrix; crank = mortality(survival))
 	size(survival) == (length(test_time), length(times)) || error("The survival matrix has $(size(survival, 1)) rows and $(size(survival, 2)) columns, not $(length(test_time)) and $(length(times)).")
+	survival = 1 .- (1 .- survival)
 	train = (; train_time, train_event)
 	km = survival_curve(train_time, train_event)
 	baseline = repeat(permutedims(km.survival), length(test_time))
